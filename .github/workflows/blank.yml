@@ -1,0 +1,101 @@
+name: PC-Virtual-Otimizado
+
+on:
+  workflow_dispatch:
+
+jobs:
+  rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360    # \~6 horas
+
+    steps:
+      - name: Otimizações de Performance + RDP
+        run: |
+          # === Performance do Windows ===
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c   # High Performance
+          powercfg /change standby-timeout-ac 0
+          powercfg /change monitor-timeout-ac 0
+          powercfg /change hibernate-timeout-ac 0
+
+          # Desativa efeitos visuais
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "UserPreferencesMask" -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00))
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop\WindowMetrics" -Name "MinAnimate" -Value 0
+
+          # === Otimizações de RDP ===
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 1 -Force
+
+          # Tenta melhorar fluidez do RDP
+          New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\DWM" -Force | Out-Null
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\DWM" -Name "DWMFRAMEINTERVAL" -Value 15 -Type DWord -Force
+
+          # Firewall
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale-UDP" dir=in action=allow protocol=UDP localport=3389
+
+          Restart-Service TermService -Force
+
+      - name: Criar usuário RDP
+        run: |
+          $chars = @{
+            U = [char[]](65..90)
+            L = [char[]](97..122)
+            N = [char[]](48..57)
+            S = [char[]](33..47 + 58..64 + 91..96 + 123..126)
+          }
+          $pass = -join (
+            ($chars.U | Get-Random -Count 5) +
+            ($chars.L | Get-Random -Count 5) +
+            ($chars.N | Get-Random -Count 4) +
+            ($chars.S | Get-Random -Count 4) | Sort-Object {Get-Random}
+          )
+          $secure = ConvertTo-SecureString $pass -AsPlainText -Force
+          New-LocalUser -Name "fivem" -Password $secure -AccountNeverExpires -PasswordNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "fivem"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "fivem"
+
+          echo "RDP_USER=fivem" >> $env:GITHUB_ENV
+          echo "RDP_PASS=$pass" >> $env:GITHUB_ENV
+
+      - name: Instalar Tailscale
+        run: |
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $msi = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $url -OutFile $msi
+          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
+          Remove-Item $msi -Force
+
+      - name: Conectar no Tailscale
+        run: |
+          & "\( env:ProgramFiles\Tailscale\tailscale.exe" up --authkey= \){{ secrets.TAILSCALE_AUTH_KEY }} --hostname=fivem-$env:GITHUB_RUN_ID --accept-routes --accept-dns=false
+          
+          $ip = $null
+          for ($i=0; $i -lt 15; $i++) {
+            $ip = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 2>$null
+            if ($ip) { break }
+            Start-Sleep 4
+          }
+          if (-not $ip) { throw "Tailscale não conseguiu IP" }
+          echo "TS_IP=$ip" >> $env:GITHUB_ENV
+
+      - name: Mostrar dados de acesso
+        run: |
+          Write-Host ""
+          Write-Host "=============================================="
+          Write-Host "   ACESSO RDP PRONTO"
+          Write-Host "=============================================="
+          Write-Host "IP Tailscale : $($env:TS_IP)"
+          Write-Host "Usuário      : $($env:RDP_USER)"
+          Write-Host "Senha        : $($env:RDP_PASS)"
+          Write-Host "=============================================="
+          Write-Host ""
+
+      - name: Manter máquina viva
+        run: |
+          while ($true) {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Máquina ativa | IP: $($env:TS_IP)"
+            Start-Sleep 180
+          }
